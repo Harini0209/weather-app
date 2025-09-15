@@ -2,23 +2,35 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:go_router/go_router.dart';
+import 'package:json_annotation/json_annotation.dart';
+import 'package:video_player/video_player.dart';
 
-// 🌤 Map weather conditions to emojis
-String getWeatherIcon(String description) {
-  description = description.toLowerCase();
-  if (description.contains("clear")) return "☀️";
-  if (description.contains("cloud")) return "☁️";
-  if (description.contains("rain")) return "🌧️";
-  if (description.contains("thunder")) return "⛈️";
-  if (description.contains("snow")) return "❄️";
-  if (description.contains("mist") ||
-      description.contains("fog") ||
-      description.contains("haze")) return "🌫️";
+part 'main.g.dart';
+
+// 🌤 Weather icons - UPDATED TO USE WEATHER ID
+String getWeatherIcon(int weatherId) {
+  if (weatherId >= 200 && weatherId < 300) return "⛈"; // Thunderstorm
+  if (weatherId >= 300 && weatherId < 600) return "🌧"; // Drizzle/Rain
+  if (weatherId >= 600 && weatherId < 700) return "❄"; // Snow
+  if (weatherId >= 700 && weatherId < 800) return "🌫"; // Mist/Haze/Atmosphere
+  if (weatherId == 800) return "☀"; // Clear sky
+  if (weatherId > 800 && weatherId < 900) return "☁"; // Clouds
   return "🌍";
 }
 
-// 🌍 Weather Data Model
+// 🎬 Map weather ID → video asset - UPDATED TO USE WEATHER ID
+String getVideoForWeather(int weatherId) {
+  if (weatherId >= 200 && weatherId < 300) return 'lib/assets/thunderstorm.mp4';
+  if (weatherId >= 300 && weatherId < 600) return 'lib/assets/rainy.mp4';
+  if (weatherId >= 600 && weatherId < 700) return 'lib/assets/snowy.mp4';
+  if (weatherId >= 700 && weatherId < 800) return 'lib/assets/cloudy.mp4';
+  if (weatherId == 800) return 'lib/assets/sunny.mp4';
+  if (weatherId > 800 && weatherId < 900) return 'lib/assets/cloudy.mp4';
+  return 'lib/assets/sunny.mp4';
+}
+
+// 🌍 Weather Model
+@JsonSerializable(explicitToJson: true)
 class WeatherData {
   final String city;
   final double temp;
@@ -28,6 +40,7 @@ class WeatherData {
   final int cloudiness;
   final double rain;
   final String description;
+  final int weatherId;
   final List<dynamic> forecast;
 
   WeatherData({
@@ -39,39 +52,59 @@ class WeatherData {
     required this.cloudiness,
     required this.rain,
     required this.description,
+    required this.weatherId,
     required this.forecast,
   });
 
-  factory WeatherData.fromJson(Map<String, dynamic> json) {
+  factory WeatherData.fromJson(Map<String, dynamic> json) =>
+      _$WeatherDataFromJson(json);
+
+  Map<String, dynamic> toJson() => _$WeatherDataToJson(this);
+
+  /// Pick forecast closest to current time and store weatherId
+  factory WeatherData.fromApi(Map<String, dynamic> json) {
     final cityName = json['city']['name'];
-    final current = json['list'][0];
+
+    final now = DateTime.now();
+    Map<String, dynamic> closest = json['list'][0];
+    Duration minDiff =
+        DateTime.parse(closest['dt_txt'] + "Z").toLocal().difference(now).abs();
+
+    for (var item in json['list']) {
+      final dt = DateTime.parse(item['dt_txt'] + "Z").toLocal();
+      final diff = dt.difference(now).abs();
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = item;
+      }
+    }
+
     return WeatherData(
       city: cityName,
-      temp: current['main']['temp'].toDouble(),
-      feelsLike: current['main']['feels_like'].toDouble(),
-      humidity: current['main']['humidity'],
-      wind: current['wind']['speed'].toDouble(),
-      cloudiness: current['clouds']['all'],
-      rain: (current['rain'] != null && current['rain']['3h'] != null)
-          ? current['rain']['3h'].toDouble()
-          : 0.0,
-      description: current['weather'][0]['description'],
+      temp: (closest['main']['temp'] as num).toDouble(),
+      feelsLike: (closest['main']['feels_like'] as num).toDouble(),
+      humidity: closest['main']['humidity'],
+      wind: (closest['wind']['speed'] as num).toDouble(),
+      cloudiness: closest['clouds']['all'],
+      rain: (closest['rain']?['3h'] as num?)?.toDouble() ?? 0.0,
+      description: closest['weather'][0]['description'],
+      weatherId: closest['weather'][0]['id'],
       forecast: json['list'],
     );
   }
 }
 
-// 🔑 API Key (replace with your own)
+// 🔑 API Key
 const String apiKey = "fbdb127778cc8f225b39771eaf89a5e7";
 
-// 🌐 Fetch Weather Function
+// 🌐 Fetch Weather
 Future<WeatherData> fetchWeather(String city) async {
   final url =
       "https://api.openweathermap.org/data/2.5/forecast?q=$city&appid=$apiKey&units=metric";
   final response = await http.get(Uri.parse(url));
 
   if (response.statusCode == 200) {
-    return WeatherData.fromJson(jsonDecode(response.body));
+    return WeatherData.fromApi(jsonDecode(response.body));
   } else {
     throw Exception("Failed to load weather data");
   }
@@ -80,13 +113,86 @@ Future<WeatherData> fetchWeather(String city) async {
 // 🌟 Providers
 final darkModeProvider = StateProvider<bool>((ref) => false);
 final cityProvider = StateProvider<String>((ref) => "");
-final forecastIndexProvider = StateProvider<double>((ref) => 0);
+final forecastIndexProvider = StateProvider<int>((ref) => 0);
+final lastCityProvider = StateProvider<String>((ref) => "");
 
 final weatherProvider =
     FutureProvider.family<WeatherData, String>((ref, city) async {
   if (city.isEmpty) throw Exception("Enter a city to get weather");
   return fetchWeather(city);
 });
+
+// 🎥 Video Widget
+class WeatherVideo extends StatefulWidget {
+  final String videoAsset;
+  final double width;
+  final double height;
+
+  const WeatherVideo({
+    super.key,
+    required this.videoAsset,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  State<WeatherVideo> createState() => _WeatherVideoState();
+}
+
+class _WeatherVideoState extends State<WeatherVideo> {
+  late VideoPlayerController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.asset(widget.videoAsset)
+      ..initialize().then((_) {
+        setState(() {});
+        _controller.setLooping(true);
+        _controller.play();
+      });
+  }
+
+  @override
+  void didUpdateWidget(covariant WeatherVideo oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.videoAsset != widget.videoAsset) {
+      _controller.pause();
+      _controller.dispose();
+      _controller = VideoPlayerController.asset(widget.videoAsset)
+        ..initialize().then((_) {
+          setState(() {});
+          _controller.setLooping(true);
+          _controller.play();
+        });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_controller.value.isInitialized) {
+      return SizedBox(
+        width: widget.width,
+        height: widget.height,
+        child: Container(color: Colors.black12),
+      );
+    }
+    return SizedBox(
+      width: widget.width,
+      height: widget.height,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: VideoPlayer(_controller),
+      ),
+    );
+  }
+}
 
 void main() {
   runApp(const ProviderScope(child: WeatherApp()));
@@ -99,34 +205,23 @@ class WeatherApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final isDark = ref.watch(darkModeProvider);
 
-    final router = GoRouter(
-      initialLocation: '/',
-      routes: [
-        GoRoute(path: '/', builder: (context, state) => const WeatherScreen()),
-        GoRoute(
-          path: '/details',
-          builder: (context, state) {
-            final WeatherData weather = state.extra as WeatherData;
-            return DetailedForecastScreen(weather: weather);
-          },
-        ),
-      ],
-    );
-
-    return MaterialApp.router(
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
+      title: 'Weather App',
       theme: ThemeData(
         brightness: Brightness.light,
         scaffoldBackgroundColor: Colors.lightBlue.shade50,
         cardColor: Colors.lightBlue[100],
+        primaryColor: Colors.lightBlue,
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: Colors.black,
-        cardColor: const Color(0xFF7F1437),
+        cardColor: Colors.deepPurple[100],
+        primaryColor: Colors.deepPurple,
       ),
       themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
-      routerConfig: router,
+      home: const WeatherScreen(),
     );
   }
 }
@@ -139,18 +234,12 @@ class WeatherScreen extends ConsumerWidget {
     final city = ref.watch(cityProvider);
     final weatherAsync = ref.watch(weatherProvider(city));
     final isDark = ref.watch(darkModeProvider);
-    final cardTextColor = isDark ? Colors.white : Colors.black;
-
-    // 🔹 Controller for search TextField
     final TextEditingController cityController =
         TextEditingController(text: city);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          "🌦 Weather App",
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
+        title: const Text("🌦 Weather App"),
         centerTitle: true,
         actions: [
           IconButton(
@@ -164,7 +253,7 @@ class WeatherScreen extends ConsumerWidget {
         padding: const EdgeInsets.all(12),
         child: Column(
           children: [
-            // 🔍 Search Bar with working button
+            // Search bar
             Row(
               children: [
                 Expanded(
@@ -187,28 +276,56 @@ class WeatherScreen extends ConsumerWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 15),
-            // Weather Data
+            const SizedBox(height: 12),
             Expanded(
               child: weatherAsync.when(
                 data: (weather) {
-                  final forecastIndex =
-                      ref.watch(forecastIndexProvider).toInt();
+                  // ✅ compute closest index once per city
+                  final now = DateTime.now();
+                  int closestIndex = 0;
+                  Duration minDiff = Duration(days: 9999);
+
+                  for (int i = 0; i < weather.forecast.length; i++) {
+                    final item = weather.forecast[i];
+                    final dt = DateTime.parse(item['dt_txt'] + "Z").toLocal();
+                    final diff = dt.difference(now).abs();
+                    if (diff < minDiff) {
+                      minDiff = diff;
+                      closestIndex = i;
+                    }
+                  }
+
+                  final lastCity = ref.read(lastCityProvider);
+                  if (lastCity != weather.city) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      ref.read(forecastIndexProvider.notifier).state =
+                          closestIndex;
+                      ref.read(lastCityProvider.notifier).state = weather.city;
+                    });
+                  }
+
+                  final forecastIndex = ref.watch(forecastIndexProvider);
                   final selected = weather.forecast[forecastIndex];
-                  final selectedTime = DateTime.parse(selected['dt_txt']);
+                  final selectedTime =
+                      DateTime.parse(selected['dt_txt'] + "Z").toLocal();
                   final selectedTemp = selected['main']['temp'].toDouble();
                   final selectedDescription =
                       selected['weather'][0]['description'];
+                  final selectedWeatherId = selected['weather'][0]['id'];
+                  final videoAsset = getVideoForWeather(selectedWeatherId);
+
+                  debugPrint(
+                      "city=${weather.city} forecastIndex=$forecastIndex id=$selectedWeatherId asset=$videoAsset");
 
                   return SingleChildScrollView(
                     child: Column(
                       children: [
-                        // Current Weather Card
+                        // Upper card: current weather
                         Card(
-                          color: isDark
-                              ? const Color(0xFF7F1437)
-                              : Colors.lightBlue[100],
                           elevation: 4,
+                          color: isDark
+                              ? Colors.deepPurple[100]
+                              : Colors.lightBlue[100],
                           child: Container(
                             width: double.infinity,
                             padding: const EdgeInsets.all(16),
@@ -217,61 +334,47 @@ class WeatherScreen extends ConsumerWidget {
                               children: [
                                 Text(
                                   weather.city.toUpperCase(),
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    color: cardTextColor,
-                                  ),
-                                ),
-                                Text(
-                                  "${weather.temp}°C",
                                   style: const TextStyle(
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.deepOrange,
-                                  ),
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.black),
                                 ),
+                                const SizedBox(height: 8),
                                 Text(
-                                  "${getWeatherIcon(weather.description)} ${weather.description}",
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    color: cardTextColor,
-                                  ),
+                                  "${weather.temp}°C ${getWeatherIcon(weather.weatherId)} ${weather.description}",
+                                  style: const TextStyle(
+                                      fontSize: 28,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.deepOrange),
                                 ),
-                                const SizedBox(height: 10),
+                                const SizedBox(height: 12),
                                 Wrap(
-                                  spacing: 12,
+                                  spacing: 20,
+                                  runSpacing: 10,
                                   children: [
-                                    Text(
-                                      "💧 Humidity: ${weather.humidity}%",
-                                      style: TextStyle(color: cardTextColor),
-                                    ),
-                                    Text(
-                                      "💨 Wind: ${weather.wind} m/s",
-                                      style: TextStyle(color: cardTextColor),
-                                    ),
-                                    Text(
-                                      "☁️ Cloudiness: ${weather.cloudiness}%",
-                                      style: TextStyle(color: cardTextColor),
-                                    ),
-                                    Text(
-                                      "🌧️ Rain: ${weather.rain} mm",
-                                      style: TextStyle(color: cardTextColor),
-                                    ),
+                                    Text("💧 Humidity: ${weather.humidity}%",
+                                        style: const TextStyle(
+                                            color: Colors.black)),
+                                    Text("💨 Wind: ${weather.wind} m/s",
+                                        style: const TextStyle(
+                                            color: Colors.black)),
+                                    Text("☁ Cloudiness: ${weather.cloudiness}%",
+                                        style: const TextStyle(
+                                            color: Colors.black)),
+                                    Text("🌧 Rain: ${weather.rain} mm",
+                                        style: const TextStyle(
+                                            color: Colors.black)),
                                   ],
                                 ),
                               ],
                             ),
                           ),
                         ),
-                        const SizedBox(height: 15),
-                        // Forecast Slider & Cards
+                        const SizedBox(height: 16),
                         const Text(
                           "5-day forecast (3-hour steps):",
                           style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
+                              fontWeight: FontWeight.bold, fontSize: 16),
                         ),
                         const SizedBox(height: 10),
                         SizedBox(
@@ -281,43 +384,43 @@ class WeatherScreen extends ConsumerWidget {
                             itemCount: weather.forecast.length,
                             itemBuilder: (context, index) {
                               final item = weather.forecast[index];
-                              final dt = DateTime.parse(item['dt_txt']);
+                              final dt = DateTime.parse(item['dt_txt'] + "Z")
+                                  .toLocal();
                               final temp = item['main']['temp'].toDouble();
                               final desc = item['weather'][0]['description'];
+                              final weatherId = item['weather'][0]['id'];
+                              final videoAsset = getVideoForWeather(weatherId);
+
                               return GestureDetector(
-                                onTap: () {
-                                  GoRouter.of(context)
-                                      .go('/details', extra: weather);
-                                },
+                                onTap: () => ref
+                                    .read(forecastIndexProvider.notifier)
+                                    .state = index,
                                 child: Card(
                                   color: index == forecastIndex
-                                      ? Colors.orangeAccent
+                                      ? Colors.blueAccent
                                       : isDark
-                                          ? const Color(0xFF7F1437)
-                                          : Colors.lightBlueAccent,
+                                          ? Colors.deepPurple[200]
+                                          : Colors.lightBlue[100],
                                   child: Container(
-                                    width: 180,
-                                    padding: const EdgeInsets.all(12),
+                                    width: 160,
+                                    padding: const EdgeInsets.all(8),
                                     child: Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
                                       children: [
+                                        WeatherVideo(
+                                            videoAsset: videoAsset,
+                                            width: 140,
+                                            height: 80),
+                                        const SizedBox(height: 8),
                                         Text(
-                                          "${dt.day}/${dt.month} ${dt.hour}:00",
-                                          style: const TextStyle(
-                                              fontWeight: FontWeight.bold),
-                                        ),
-                                        const SizedBox(height: 5),
+                                            "${dt.day}/${dt.month} ${dt.hour}:00",
+                                            style: const TextStyle(
+                                                fontWeight: FontWeight.bold)),
+                                        const SizedBox(height: 4),
+                                        Text("${temp.toStringAsFixed(1)}°C"),
+                                        const SizedBox(height: 4),
                                         Text(
-                                          "${temp.toStringAsFixed(1)}°C",
-                                          style: const TextStyle(fontSize: 22),
-                                        ),
-                                        const SizedBox(height: 5),
-                                        Text(
-                                          "${getWeatherIcon(desc)} $desc",
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(fontSize: 16),
-                                        ),
+                                            "${getWeatherIcon(weatherId)} $desc",
+                                            textAlign: TextAlign.center),
                                       ],
                                     ),
                                   ),
@@ -326,78 +429,78 @@ class WeatherScreen extends ConsumerWidget {
                             },
                           ),
                         ),
-                        const SizedBox(height: 10),
                         Slider(
-                          value: ref.watch(forecastIndexProvider),
+                          value: ref.watch(forecastIndexProvider).toDouble(),
                           min: 0,
                           max: (weather.forecast.length - 1).toDouble(),
                           divisions: weather.forecast.length - 1,
                           label: "$forecastIndex",
                           onChanged: (value) => ref
                               .read(forecastIndexProvider.notifier)
-                              .state = value,
+                              .state = value.toInt(),
                         ),
-                        // Selected Forecast Card
+                        const SizedBox(height: 10),
                         Card(
+                          elevation: 3,
                           color: isDark
-                              ? const Color(0xFF7F1437)
+                              ? Colors.deepPurple[200]
                               : Colors.lightBlue[100],
                           child: Container(
                             width: double.infinity,
                             padding: const EdgeInsets.all(16),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                            child: Column(
                               children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        "Selected: ${selectedTime.toLocal()}",
-                                        style: TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            color: cardTextColor),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        "${getWeatherIcon(selectedDescription)} Weather: $selectedDescription",
-                                        style: TextStyle(color: cardTextColor),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        "💨 Wind: ${weather.wind} m/s",
-                                        style: TextStyle(color: cardTextColor),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Container(
-                                  height: 60,
-                                  width: 1,
-                                  color:
-                                      isDark ? Colors.white54 : Colors.black54,
-                                  margin: const EdgeInsets.symmetric(
-                                      horizontal: 12),
-                                ),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                WeatherVideo(
+                                    videoAsset: videoAsset,
+                                    width: double.infinity,
+                                    height: 200),
+                                const SizedBox(height: 12),
+                                Row(
                                   children: [
-                                    Text(
-                                      "🌡 Temp: ${selectedTemp}°C",
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: cardTextColor),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            "Selected: ${selectedTime.toLocal()}",
+                                            style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.black),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Text(
+                                              "Weather: ${getWeatherIcon(selectedWeatherId)} $selectedDescription",
+                                              style: const TextStyle(
+                                                  color: Colors.black)),
+                                        ],
+                                      ),
                                     ),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      "💧 Humidity: ${weather.humidity}%",
-                                      style: TextStyle(color: cardTextColor),
+                                    const VerticalDivider(
+                                      thickness: 1,
+                                      color: Colors.black54,
+                                      width: 20,
                                     ),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      "🤔 Feels: ${weather.feelsLike}°C",
-                                      style: TextStyle(color: cardTextColor),
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                            "💨 Wind: ${selected['wind']['speed']} m/s",
+                                            style: const TextStyle(
+                                                color: Colors.black)),
+                                        Text("🌡 Temp: $selectedTemp °C",
+                                            style: const TextStyle(
+                                                color: Colors.black)),
+                                        Text(
+                                            "💧 Humidity: ${selected['main']['humidity']}%",
+                                            style: const TextStyle(
+                                                color: Colors.black)),
+                                        Text(
+                                            "🤔 Feels Like: ${selected['main']['feels_like']}°C",
+                                            style: const TextStyle(
+                                                color: Colors.black)),
+                                      ],
                                     ),
                                   ],
                                 ),
@@ -405,6 +508,7 @@ class WeatherScreen extends ConsumerWidget {
                             ),
                           ),
                         ),
+                        const SizedBox(height: 12),
                       ],
                     ),
                   );
@@ -420,54 +524,3 @@ class WeatherScreen extends ConsumerWidget {
   }
 }
 
-class DetailedForecastScreen extends StatelessWidget {
-  final WeatherData weather;
-  const DetailedForecastScreen({super.key, required this.weather});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("Detailed Forecast"), centerTitle: true),
-      body: Padding(
-        padding: const EdgeInsets.all(12),
-        child: SingleChildScrollView(
-          child: Column(
-            children: [
-              Card(
-                color: Colors.blueGrey[100],
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        weather.city.toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      Text(
-                        "${weather.temp}°C",
-                        style: const TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.deepOrange,
-                        ),
-                      ),
-                      Text(
-                        "${getWeatherIcon(weather.description)} ${weather.description}",
-                        style: const TextStyle(fontSize: 18),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
